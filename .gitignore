@@ -8,3 +8,4 @@ run.bash
 
 *.pyc
 **/__pycache__
+wandb
