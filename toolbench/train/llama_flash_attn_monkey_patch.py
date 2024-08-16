@@ -2,16 +2,11 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 import transformers
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-import torch
-from torch import nn
-import torch.nn.functional as F
-import math
-import transformers
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-    
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, LlamaAttention, LlamaModel
+
 
 def forward_2(
         self,
@@ -71,6 +66,6 @@ def _prepare_decoder_attention_mask(self, attention_mask, input_shape,
     return attention_mask
 
 def replace_llama_attn_with_flash_attn():
-    transformers.models.llama.modeling_llama.LlamaModel._prepare_decoder_attention_mask = _prepare_decoder_attention_mask
-    transformers.models.llama.modeling_llama.LlamaAttention.forward = forward_2
+    LlamaModel._prepare_decoder_attention_mask = _prepare_decoder_attention_mask
+    LlamaAttention.forward = forward_2
     

@@ -1,6 +1,6 @@
 export PYTHONPATH=./
-deepspeed --master_port=20001 toolbench/train/train_lora.py \
-    --model_name_or_path huggyllama/llama-7b  \
+python  toolbench/train/train_lora.py \
+    --model_name_or_path ToolBench/ToolLLaMA-2-7b-v2  \
     --data_path  data/toolllama_G123_dfs_train.json \
     --eval_data_path  data/toolllama_G123_dfs_eval.json \
     --conv_template tool-llama-single-round \

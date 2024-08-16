@@ -126,7 +126,8 @@ class ToolLLaMA:
 
 if __name__ == "__main__":
     # can accept all huggingface LlamaModel family
-    llm = ToolLLaMA("decapoda-research/llama-7b-hf")
+    # llm = ToolLLaMA("decapoda-research/llama-7b-hf")
+    llm = ToolLLaMA("ToolBench/ToolLLaMA-2-7b-v2")
     messages = [
         {'role': 'system', 'content': '''You are AutoGPT, you can use many tools(functions) to do
 the following task.\nFirst I will give you the task description, and your task start.\nAt each step, you need to give your thought to analyze the status now and what to do next, with a function call to actually excute your step.\nAfter the call, you will get the call result, and you are now in a new state.\nThen you will analyze your status now, then decide what to do next...\nAfter many (Thought-call) pairs, you finally perform the task, then you can give your finial answer.\nRemember: \n1.the state change is , you can\'t go
@@ -139,5 +140,5 @@ at the input format'''},
 to interact with the game, and the total process of a input use 3 steps of call, each step you can only combine 2 of the left numbers, so the count of left numbers decrease from 4 to 1''','parameters':{'type': 'object', 'properties':{}}}]#, 'parameters': {'type': 'object', 'properties': {'input': {'type': 'string', 'description': 'describe what number you want to conbine, and how to conbine.'}}, 'required': ['input']}}]
 
     llm.change_messages(messages)
-    output = llm.parse(functions=functions)
+    output = llm.parse(functions=functions, process_id=0)
     print(output)

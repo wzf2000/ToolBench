@@ -16,29 +16,38 @@
 #    limitations under the License.
 
 from dataclasses import dataclass, field
-import logging
+import math
 import pathlib
 import typing
 import os
-# from deepspeed import zero
-# from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+import torch
+from deepspeed import zero
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from peft import LoraConfig, get_peft_model
+from accelerate.utils import DistributedType
 import transformers
-from transformers import Trainer
+from transformers import Trainer, deepspeed
 
-from toolbench.train.train import (
+from toolbench.train.train_llama3 import (
     DataArguments,
     ModelArguments,
     TrainingArguments,
     make_supervised_data_module,
 )
 
-from toolbench.train.llama_flash_attn_monkey_patch import (
+from fastchat.train.llama2_flash_attn_monkey_patch import (
     replace_llama_attn_with_flash_attn,
 )
-from toolbench.train.llama_condense_monkey_patch import replace_llama_with_condense
 replace_llama_attn_with_flash_attn()
 
+import wandb
+
+wandb.login(
+    anonymous="must",
+    key = "79614754350ba92f82c0502f5e8c9625676cf1b9",
+    relogin=True,
+)
+wandb.init(project="new-SFT", name="llama3.1-8B")
 
 @dataclass
 class LoraArguments:
@@ -54,10 +63,9 @@ class LoraArguments:
 
 def maybe_zero_3(param):
     if hasattr(param, "ds_id"):
-        pass
-        # assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE
-        # with zero.GatheredParameters([param]):
-        #     param = param.data.detach().cpu().clone()
+        assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        with zero.GatheredParameters([param]):
+            param = param.data.detach().cpu().clone()
     else:
         param = param.detach().cpu().clone()
     return param
@@ -90,6 +98,8 @@ def get_peft_state_maybe_zero_3(named_params, bias):
 
 
 def train():
+    global local_rank
+
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments, LoraArguments)
     )
@@ -99,20 +109,57 @@ def train():
         training_args,
         lora_args,
     ) = parser.parse_args_into_dataclasses()
+    
+    if getattr(training_args, 'deepspeed', None) and int(os.environ.get("WORLD_SIZE", 1)) == 1:
+        training_args.distributed_state.distributed_type = DistributedType.DEEPSPEED
 
-    if training_args.source_model_max_length < training_args.model_max_length:
-        condense_ratio = int(training_args.model_max_length/training_args.source_model_max_length)
-        # ratio = N means the sequence length is expanded by N, remember to change the model_max_length to 8192 (2048 * ratio) for ratio = 4
-        replace_llama_with_condense(ratio=condense_ratio)
+    local_rank = training_args.local_rank
 
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    ddp = world_size != 1
-    device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)} if ddp else None
-    model = transformers.AutoModelForCausalLM.from_pretrained(
+    device_map = None
+    
+    model_load_kwargs = {
+        'low_cpu_mem_usage': not deepspeed.is_deepspeed_zero3_enabled(),
+    }
+    
+    config = transformers.AutoConfig.from_pretrained(
         model_args.model_name_or_path,
+        trust_remote_code=True,
         cache_dir=training_args.cache_dir,
-        device_map=device_map
     )
+    config.use_cache = False
+    
+    # llama3.1 has a max_position_embeddings of 131072 (2^17)
+    # orig_ctx_len = getattr(config, "max_position_embeddings", None)
+    # if orig_ctx_len and training_args.model_max_length > orig_ctx_len:
+    #     scaling_factor = float(math.ceil(training_args.model_max_length / orig_ctx_len))
+    #     config.rope_scaling = {
+    #         "type": "linear",
+    #         "factor": scaling_factor,
+    #     }
+
+    model: transformers.LlamaForCausalLM = transformers.AutoModelForCausalLM.from_pretrained(
+        model_args.model_name_or_path,
+        config=config,
+        trust_remote_code=True,
+        cache_dir=training_args.cache_dir,
+        device_map=device_map,
+        **model_load_kwargs,
+    )
+    # model.tie_weights()
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path,
+        config=config,
+        trust_remote_code=True,
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        use_fast=False,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    
     lora_config = LoraConfig(
         r=lora_args.lora_r,
         lora_alpha=lora_args.lora_alpha,
@@ -122,45 +169,37 @@ def train():
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_config)
-    if training_args.deepspeed is not None and training_args.local_rank == 0:
+    if training_args.deepspeed is not None and local_rank == 0:
         model.print_trainable_parameters()
 
     if training_args.gradient_checkpointing:
-        logging.warning(
-            "gradient checkpointing with lora makes requires_grad "
-            "incorrect and needs a monkey patch in Trainer or the "
-            "wrapped model's forward. ref: "
-            "https://github.com/lm-sys/FastChat/pull/138#issuecomment-1509172198"
-        )
         model.enable_input_require_grads()
-        
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=False,
-    )
-    tokenizer.pad_token = tokenizer.unk_token
+    
+    template_id = model_args.template_id if hasattr(model_args, "template_id") else model_args.model_name_or_path
 
-    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+    data_module = make_supervised_data_module(
+        tokenizer=tokenizer,
+        template_id=template_id,
+        train_ratio=0.98,
+        data_args=data_args
+    )
+
     trainer = Trainer(
         model=model, tokenizer=tokenizer, args=training_args, **data_module
     )
 
-    model.config.use_cache = False
-
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
-    else:
-        trainer.train()
+    with torch.autocast("cuda"):
+        if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+            trainer.train(resume_from_checkpoint=True)
+        else:
+            trainer.train()
     trainer.save_state()
 
     # Save states. Weights might be a placeholder in zero3 and need a gather
     state_dict = get_peft_state_maybe_zero_3(
         model.named_parameters(), lora_args.lora_bias
     )
-    if training_args.local_rank == 0:
+    if local_rank == 0:
         model.save_pretrained(training_args.output_dir, state_dict=state_dict)
 
 
