@@ -1,6 +1,6 @@
 {
-    "bfloat16": {
-        "enabled": false
+    "bf16": {
+        "enabled": "auto"
     },
     "fp16": {
         "enabled": "auto",
